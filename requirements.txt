@@ -1,7 +1,8 @@
 fastapi
 uvicorn[standard]
-braindecode==1.2.0
 torch
-mne
+braindecode==1.2.0
 numpy<2
 scipy
+requests
+huggingface_hub
