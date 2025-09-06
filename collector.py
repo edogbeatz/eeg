@@ -12,13 +12,8 @@ def main():
     BoardShim.enable_dev_board_logger()
     params = BrainFlowInputParams()
     
-    # Set your port; examples:
-    # params.serial_port = "/dev/tty.usbserial-DM03..."  # macOS
-    # params.serial_port = "COM3"                        # Windows
-    # params.serial_port = "/dev/ttyUSB0"                # Linux
-    
-    # Uncomment and set your actual port:
-    # params.serial_port = "YOUR_CYTON_PORT_HERE"
+    # Set your Cyton port (detected automatically)
+    params.serial_port = "/dev/cu.usbserial-DM01N8KH"  # Your Cyton board
     
     board = BoardShim(BoardIds.CYTON_BOARD.value, params)
     sr = BoardShim.get_sampling_rate(BoardIds.CYTON_BOARD.value)
@@ -32,22 +27,34 @@ def main():
 
     try:
         n_times = int(sr * WINDOW_SECONDS)
+        print(f"Waiting for {n_times} samples ({WINDOW_SECONDS} seconds)...")
+        
         while True:
-            time.sleep(WINDOW_SECONDS / 2)  # slide by 2 s
+            time.sleep(1)  # Check every second
             data = board.get_board_data()   # (n_rows, n_samples)
-            if data.shape[1] < n_times: 
-                print(f"Not enough data yet: {data.shape[1]}/{n_times}")
+            current_samples = data.shape[1]
+            
+            if current_samples < n_times: 
+                print(f"Collecting: {current_samples}/{n_times} samples ({current_samples/sr:.1f}s)")
                 continue
             
+            # We have enough data!
             eeg = data[eeg_ids, -n_times:]  # pick last window
-            print(f"Processing window: {eeg.shape}")
+            print(f"✅ Processing window: {eeg.shape}")
+            print(f"   Data range: {eeg.min():.3f} to {eeg.max():.3f}")
             
             payload = {"x": eeg.tolist(), "n_outputs": 2}
             try:
-                r = requests.post(URL, json=payload, timeout=10)
-                print(f"API Response ({r.status_code}): {r.text[:120]}")
+                print("🧠 Sending to API...")
+                r = requests.post(URL, json=payload, timeout=15)
+                print(f"✅ API Response ({r.status_code}): {r.text[:200]}")
+                
+                # Reset buffer for next window
+                board.get_board_data()  # Clear buffer
+                print("🔄 Buffer cleared, collecting next window...")
+                
             except Exception as e:
-                print(f"API Error: {e}")
+                print(f"❌ API Error: {e}")
                 
     except KeyboardInterrupt:
         print("Stopping...")
