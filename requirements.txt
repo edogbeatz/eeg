@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+braindecode==1.2.0
+torch
+mne
+numpy<2
+scipy
