@@ -1,3 +1,72 @@
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
 .env
 .venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+eeg-env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# EEG specific
+*.edf
+*.bdf
+*.fif
+*.set
+*.cnt
+*.eeg
+*.vhdr
+*.vmrk
+
+# Model weights (if large)
+weights/*.pth
+weights/*.pt
+weights/*.h5
+*.model
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+test_*.py
