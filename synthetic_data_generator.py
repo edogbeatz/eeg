@@ -1,7 +1,7 @@
 """
 Synthetic EEG Data Generator for LaBraM Training
 
-Generates realistic synthetic EEG data for "relaxed vs anxious" classification
+Generates realistic synthetic EEG data for meditation detection
 using spectral characteristics and artifacts. Compatible with BrainFlow pipeline.
 """
 
@@ -138,72 +138,78 @@ class SyntheticEEGGenerator:
         
         return signal_with_artifacts
     
-    def generate_relaxed_state(self, amplitude_scale: float = 1.0) -> np.ndarray:
-        """Generate EEG characteristic of relaxed state"""
-        # Base pink noise
-        base_signal = self.generate_base_noise(amplitude=10 * amplitude_scale)
+    def generate_meditation_state(self, amplitude_scale: float = 1.0) -> np.ndarray:
+        """Generate EEG characteristic of meditation state"""
+        # Base pink noise (very low, calm state)
+        base_signal = self.generate_base_noise(amplitude=8 * amplitude_scale)
         
-        # Strong alpha waves (relaxed, eyes closed)
+        # Very strong alpha waves (deep meditation, eyes closed, focused attention)
         alpha_signal = self.generate_band_oscillations(
             ALPHA_BAND, 
-            amplitude=25 * amplitude_scale,
-            phase_coupling=True  # Synchronized alpha
+            amplitude=35 * amplitude_scale,  # Increased for deep meditation
+            phase_coupling=True  # Highly synchronized alpha in meditation
         )
         
-        # Moderate theta (drowsy relaxation)
+        # Enhanced theta (deep meditative states, mindfulness)
         theta_signal = self.generate_band_oscillations(
             THETA_BAND, 
-            amplitude=15 * amplitude_scale
+            amplitude=20 * amplitude_scale  # Higher theta in meditation
         )
         
-        # Low beta (reduced mental activity)
+        # Minimal beta (very reduced mental chatter)
         beta_signal = self.generate_band_oscillations(
             BETA_BAND, 
-            amplitude=8 * amplitude_scale
+            amplitude=5 * amplitude_scale  # Very low beta in meditation
+        )
+        
+        # Slight gamma enhancement (awareness, consciousness)
+        gamma_signal = self.generate_band_oscillations(
+            GAMMA_BAND,
+            amplitude=3 * amplitude_scale  # Subtle gamma increase
         )
         
         # Combine signals
-        eeg_signal = base_signal + alpha_signal + theta_signal + beta_signal
+        eeg_signal = base_signal + alpha_signal + theta_signal + beta_signal + gamma_signal
         
-        # Add minimal artifacts (relaxed state)
-        eeg_signal = self.add_artifacts(eeg_signal, artifact_prob=0.1)
+        # Very minimal artifacts (deep calm state)
+        eeg_signal = self.add_artifacts(eeg_signal, artifact_prob=0.05)
         
         return eeg_signal
     
-    def generate_anxious_state(self, amplitude_scale: float = 1.0) -> np.ndarray:
-        """Generate EEG characteristic of anxious state"""
-        # Base pink noise (higher amplitude due to tension)
-        base_signal = self.generate_base_noise(amplitude=15 * amplitude_scale)
+    def generate_non_meditation_state(self, amplitude_scale: float = 1.0) -> np.ndarray:
+        """Generate EEG characteristic of normal waking/active state (non-meditation)"""
+        # Base pink noise (normal amplitude)
+        base_signal = self.generate_base_noise(amplitude=12 * amplitude_scale)
         
-        # Reduced alpha waves (active, alert state)
+        # Normal alpha waves (awake, relaxed but not meditating)
         alpha_signal = self.generate_band_oscillations(
             ALPHA_BAND, 
+            amplitude=15 * amplitude_scale  # Moderate alpha
+        )
+        
+        # Active beta waves (normal mental activity, thinking)
+        beta_signal = self.generate_band_oscillations(
+            BETA_BAND, 
+            amplitude=20 * amplitude_scale  # Active thinking
+        )
+        
+        # Moderate gamma (normal awareness)
+        gamma_signal = self.generate_band_oscillations(
+            GAMMA_BAND, 
             amplitude=8 * amplitude_scale
         )
         
-        # Increased beta waves (anxiety, worry)
-        beta_signal = self.generate_band_oscillations(
-            BETA_BAND, 
-            amplitude=30 * amplitude_scale
-        )
-        
-        # Some gamma activity (high arousal)
-        gamma_signal = self.generate_band_oscillations(
-            GAMMA_BAND, 
-            amplitude=12 * amplitude_scale
-        )
-        
-        # Elevated theta (emotional processing)
+        # Variable theta (normal drowsiness/creativity)
         theta_signal = self.generate_band_oscillations(
             THETA_BAND, 
-            amplitude=20 * amplitude_scale
+            amplitude=10 * amplitude_scale
         )
         
         # Combine signals
         eeg_signal = base_signal + alpha_signal + beta_signal + gamma_signal + theta_signal
         
-        # Add more artifacts (tension, movement)
-        eeg_signal = self.add_artifacts(eeg_signal, artifact_prob=0.25)
+        # Normal artifacts (normal movement, blinking)
+        eeg_signal = self.add_artifacts(eeg_signal, artifact_prob=0.15)
         
         return eeg_signal
     
@@ -219,7 +225,7 @@ class SyntheticEEGGenerator:
         return signal_normalized.astype(np.float32)
     
     def generate_window(self, 
-                       state: str = "relaxed", 
+                       state: str = "meditation", 
                        preprocess: bool = True,
                        amplitude_variation: float = 0.3,
                        apply_augmentation: bool = False) -> Tuple[np.ndarray, int]:
@@ -227,7 +233,7 @@ class SyntheticEEGGenerator:
         Generate a single EEG window
         
         Args:
-            state: "relaxed" or "anxious"
+            state: "meditation" or "non_meditation"
             preprocess: Apply DC removal and z-scoring
             amplitude_variation: Random amplitude scaling factor
             apply_augmentation: Apply realistic augmentations to reduce domain gap
@@ -235,19 +241,19 @@ class SyntheticEEGGenerator:
         Returns:
             Tuple of (eeg_data, label) where:
             - eeg_data: (n_channels, n_times) array
-            - label: 0 for relaxed, 1 for anxious
+            - label: 1 for meditation, 0 for non_meditation
         """
         # Random amplitude variation
         amp_scale = 1.0 + np.random.uniform(-amplitude_variation, amplitude_variation)
         
-        if state.lower() == "relaxed":
-            signal = self.generate_relaxed_state(amp_scale)
-            label = 0
-        elif state.lower() == "anxious":
-            signal = self.generate_anxious_state(amp_scale)
-            label = 1
+        if state.lower() in ["meditation", "meditative", "meditating"]:
+            signal = self.generate_meditation_state(amp_scale)
+            label = 1  # Meditation is positive class
+        elif state.lower() in ["non_meditation", "non-meditation", "normal", "active", "awake"]:
+            signal = self.generate_non_meditation_state(amp_scale)
+            label = 0  # Non-meditation is negative class
         else:
-            raise ValueError(f"Unknown state: {state}. Use 'relaxed' or 'anxious'")
+            raise ValueError(f"Unknown state: {state}. Use 'meditation' or 'non_meditation'")
         
         # Apply augmentation before preprocessing to simulate real-world conditions
         if apply_augmentation:
@@ -280,27 +286,27 @@ class SyntheticEEGGenerator:
         all_data = []
         all_labels = []
         
-        # Generate relaxed samples
-        print("Generating relaxed samples...")
+        # Generate non-meditation samples
+        print("Generating non-meditation samples...")
         for i in range(n_samples_per_class):
             if i % 100 == 0:
                 print(f"  Progress: {i}/{n_samples_per_class}")
             
             # Apply augmentation to a fraction of samples
             apply_aug = np.random.random() < augmentation_ratio
-            data, label = self.generate_window("relaxed", apply_augmentation=apply_aug)
+            data, label = self.generate_window("non_meditation", apply_augmentation=apply_aug)
             all_data.append(data)
             all_labels.append(label)
         
-        # Generate anxious samples
-        print("Generating anxious samples...")
+        # Generate meditation samples
+        print("Generating meditation samples...")
         for i in range(n_samples_per_class):
             if i % 100 == 0:
                 print(f"  Progress: {i}/{n_samples_per_class}")
             
             # Apply augmentation to a fraction of samples
             apply_aug = np.random.random() < augmentation_ratio
-            data, label = self.generate_window("anxious", apply_augmentation=apply_aug)
+            data, label = self.generate_window("meditation", apply_augmentation=apply_aug)
             all_data.append(data)
             all_labels.append(label)
         
@@ -323,7 +329,7 @@ class SyntheticEEGGenerator:
                 'sampling_rate': self.sampling_rate,
                 'window_seconds': self.window_seconds,
                 'channel_names': CHANNEL_NAMES[:self.n_channels],
-                'class_names': ['relaxed', 'anxious'],
+                'class_names': ['non_meditation', 'meditation'],
                 'augmentation_ratio': augmentation_ratio,
                 'generated_at': time.strftime('%Y-%m-%d %H:%M:%S')
             }

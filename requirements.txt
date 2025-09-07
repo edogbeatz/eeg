@@ -7,3 +7,5 @@ scipy
 requests
 huggingface_hub
 brainflow
+mne>=1.0.0  # For real EEG data loading
+pandas  # For metadata processing

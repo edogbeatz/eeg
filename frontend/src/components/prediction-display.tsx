@@ -20,8 +20,8 @@ export function PredictionDisplay({ prediction }: PredictionDisplayProps) {
   const maxProb = Math.max(...probs)
   const predictedClass = probs.indexOf(maxProb)
   
-  // Class labels - you can customize these based on your model
-  const classLabels = probs.map((_, i) => `Class ${i + 1}`)
+  // Class labels for meditation detection
+  const classLabels = ['Non-Meditation', 'Meditation']
   
   const getConfidenceColor = (confidence: number) => {
     if (confidence >= 0.8) return 'text-green-600 bg-green-50'
@@ -45,7 +45,7 @@ export function PredictionDisplay({ prediction }: PredictionDisplayProps) {
         <div className="flex items-center justify-center gap-2 mb-2">
           <Brain className="h-6 w-6 text-blue-600" />
           <h3 className="text-lg font-semibold text-blue-900">
-            Predicted Class
+            Meditation Detection
           </h3>
         </div>
         
@@ -61,7 +61,7 @@ export function PredictionDisplay({ prediction }: PredictionDisplayProps) {
 
       {/* Probability Breakdown */}
       <div className="space-y-3">
-        <h4 className="font-semibold text-gray-900">Class Probabilities</h4>
+        <h4 className="font-semibold text-gray-900">Detection Probabilities</h4>
         
         {probs.map((prob, index) => (
           <div key={index} className="space-y-2">

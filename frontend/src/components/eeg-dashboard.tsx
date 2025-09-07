@@ -12,6 +12,7 @@ import { EEGChannelGrid } from './eeg-channel-grid'
 import { EEGWaveform } from './eeg-waveform'
 import { ElectrodeStatus } from './electrode-status'
 import { PredictionDisplay } from './prediction-display'
+import { TrainingInterface } from './training-interface'
 
 interface EEGData {
   data: number[][]
@@ -268,7 +269,7 @@ export function EEGDashboard() {
 
       {/* Data Display */}
       {eegData && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 gap-6">
           {/* Channel Grid */}
           <Card>
             <CardHeader>
@@ -279,23 +280,6 @@ export function EEGDashboard() {
             </CardHeader>
             <CardContent>
               <EEGChannelGrid data={eegData.data} />
-            </CardContent>
-          </Card>
-
-          {/* Waveform Display */}
-          <Card>
-            <CardHeader>
-              <CardTitle>EEG Waveforms</CardTitle>
-              <CardDescription>
-                Real-time signal visualization at {eegData.sampling_rate} Hz
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <EEGWaveform 
-                data={eegData.data} 
-                samplingRate={eegData.sampling_rate}
-                channels={eegData.channels}
-              />
             </CardContent>
           </Card>
         </div>
@@ -323,9 +307,9 @@ export function EEGDashboard() {
           {prediction && (
             <Card>
               <CardHeader>
-                <CardTitle>LaBraM Predictions</CardTitle>
+                <CardTitle>Meditation Detection</CardTitle>
                 <CardDescription>
-                  Brain signal classification results
+                  Real-time meditation state classification
                   {prediction.synthetic_data && (
                     <Badge variant="outline" className="ml-2">
                       Synthetic Data
@@ -340,6 +324,9 @@ export function EEGDashboard() {
           )}
         </div>
       )}
+
+      {/* Training Interface */}
+      <TrainingInterface />
 
       {/* Data Statistics */}
       {eegData && (

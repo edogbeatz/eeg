@@ -1,10 +1,13 @@
 import os
+import time
+import threading
+import json
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 try:
@@ -18,6 +21,8 @@ from electrode_detection import ElectrodeDetector, create_board_connection
 from brainflow_labram_integration import BrainFlowLaBraMPipeline
 from brainflow_synthetic_integration import UnifiedBoardManager, SyntheticBoardManager
 from synthetic_data_generator import SyntheticEEGGenerator
+from train_synthetic import SyntheticEEGTrainer
+from real_data_trainer import RealDataTrainer
 
 # ---- Cyton-friendly defaults ----
 CYTON_SR = 250                    # Hz
@@ -35,7 +40,7 @@ WEIGHTS_DIR = Path(os.getenv("WEIGHTS_DIR", "./weights"))
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 CHECKPOINT_PATH = WEIGHTS_DIR / "labram_checkpoint.pth"
 
-app = FastAPI(title="EEG API (Cyton x LaBraM)")
+app = FastAPI(title="EEG Meditation Detection API (Cyton x LaBraM)")
 
 # Add CORS middleware
 app.add_middleware(
@@ -58,6 +63,27 @@ class ElectrodeImpedanceRequest(BaseModel):
 class BoardConnectionRequest(BaseModel):
     serial_port: str
 
+class TrainingConfig(BaseModel):
+    n_epochs: int = 15
+    n_samples_per_class: int = 1500
+    val_split: float = 0.2
+    freeze_backbone: bool = True
+    learning_rate: float = 1e-3
+    batch_size: int = 32
+    weight_decay: float = 1e-4
+    save_dir: str = "./trained_models"
+
+class TrainingControlRequest(BaseModel):
+    action: str  # "start" or "stop"
+    config: Optional[TrainingConfig] = None
+
+class RealDataTrainingConfig(BaseModel):
+    dataset_id: str = "ds003969"
+    n_epochs: int = 20
+    val_split: float = 0.2
+    save_dir: str = "./real_trained_models"
+    force_redownload: bool = False
+
 _model = None
 _shape = None
 _loaded_ckpt: Optional[Path] = None
@@ -67,9 +93,39 @@ _pipeline = None
 synthetic_manager = None
 synthetic_generator = None
 
+# Training state management
+_training_status = {
+    "is_training": False,
+    "current_epoch": 0,
+    "total_epochs": 0,
+    "train_loss": 0.0,
+    "val_loss": 0.0,
+    "train_acc": 0.0,
+    "val_acc": 0.0,
+    "best_val_acc": 0.0,
+    "start_time": None,
+    "elapsed_time": 0.0,
+    "eta": None,
+    "config": None,
+    "history": {
+        "train_losses": [],
+        "val_losses": [],
+        "train_accs": [],
+        "val_accs": []
+    }
+}
+_training_thread = None
+_stop_training_flag = False
+_trainer = None
+
 def maybe_download_checkpoint() -> Optional[Path]:
     global _loaded_ckpt
     if _loaded_ckpt is not None:
+        return _loaded_ckpt
+
+    # Check for local checkpoint first
+    if CHECKPOINT_PATH.exists():
+        _loaded_ckpt = CHECKPOINT_PATH
         return _loaded_ckpt
 
     if WEIGHTS_URL:
@@ -107,8 +163,13 @@ def get_model(n_chans: int, n_times: int, n_outputs: int):
         ckpt = maybe_download_checkpoint()
         if ckpt and ckpt.exists():
             state = torch.load(ckpt, map_location="cpu")
-            state = state.get("state_dict", state)
-            m.load_state_dict(state, strict=False)
+            # Handle our specific training format
+            if "model_state_dict" in state:
+                model_state = state["model_state_dict"]
+            else:
+                model_state = state.get("state_dict", state)
+            m.load_state_dict(model_state, strict=False)
+            print(f"✅ Loaded trained meditation model from {ckpt}")
         _model, _shape = m, key
     return _model
 
@@ -709,8 +770,8 @@ def predict_synthetic():
 # ===== NEW ENHANCED SYNTHETIC DATA ENDPOINTS =====
 
 @app.post("/synthetic/generate-custom")
-def generate_custom_synthetic(state: str = "relaxed", preprocess: bool = True):
-    """Generate custom synthetic EEG data with specific mental state"""
+def generate_custom_synthetic(state: str = "meditation", preprocess: bool = True):
+    """Generate custom synthetic EEG data for meditation detection"""
     try:
         generator = SyntheticEEGGenerator()
         data, label = generator.generate_window(state, preprocess)
@@ -750,8 +811,8 @@ def generate_synthetic_dataset(n_samples_per_class: int = 100):
             "shape": dataset['data'].shape,
             "metadata": dataset['metadata'],
             "class_distribution": {
-                "relaxed": int(np.sum(dataset['labels'] == 0)),
-                "anxious": int(np.sum(dataset['labels'] == 1))
+                "non_meditation": int(np.sum(dataset['labels'] == 0)),
+                "meditation": int(np.sum(dataset['labels'] == 1))
             }
         }
     except Exception as e:
@@ -826,7 +887,7 @@ def get_synthetic_window(window_seconds: float = 4.0):
         raise HTTPException(500, f"Error getting synthetic window: {str(e)}")
 
 @app.post("/synthetic/predict-custom")
-def predict_custom_synthetic(state: str = "relaxed"):
+def predict_custom_synthetic(state: str = "meditation"):
     """Generate custom synthetic data and run prediction"""
     try:
         # Generate custom data
@@ -886,6 +947,370 @@ def get_synthetic_board_info():
             return {"connected": False, "type": None}
     except Exception as e:
         raise HTTPException(500, f"Error getting board info: {str(e)}")
+
+# ===== TRAINING INTERFACE ENDPOINTS =====
+
+def run_training_background(config: TrainingConfig):
+    """Background training function that runs in a separate thread"""
+    global _training_status, _stop_training_flag, _trainer
+    
+    try:
+        _training_status["is_training"] = True
+        _training_status["start_time"] = time.time()
+        _training_status["config"] = config.dict()
+        
+        # Create trainer
+        _trainer = SyntheticEEGTrainer(
+            n_channels=DEFAULT_NCH,
+            n_times=DEFAULT_NTIMES,
+            n_classes=DEFAULT_NOUT
+        )
+        
+        # Setup model
+        weights_dir = Path("./weights")
+        pretrained_path = weights_dir / "labram_checkpoint.pth"
+        
+        _trainer.setup_model(
+            freeze_backbone=config.freeze_backbone,
+            pretrained_path=pretrained_path if pretrained_path.exists() else None
+        )
+        
+        # Generate data
+        train_loader, val_loader = _trainer.generate_data(
+            n_samples_per_class=config.n_samples_per_class,
+            val_split=config.val_split
+        )
+        
+        _training_status["total_epochs"] = config.n_epochs
+        best_val_acc = 0
+        
+        # Training loop
+        for epoch in range(config.n_epochs):
+            if _stop_training_flag:
+                print("Training stopped by user")
+                break
+                
+            _training_status["current_epoch"] = epoch + 1
+            
+            # Train epoch
+            train_loss, train_acc = _trainer.train_epoch(train_loader)
+            
+            # Validate
+            val_loss, val_acc = _trainer.validate(val_loader)
+            
+            # Update status
+            _training_status["train_loss"] = train_loss
+            _training_status["val_loss"] = val_loss
+            _training_status["train_acc"] = train_acc
+            _training_status["val_acc"] = val_acc
+            _training_status["elapsed_time"] = time.time() - _training_status["start_time"]
+            
+            # Calculate ETA
+            if epoch > 0:
+                avg_epoch_time = _training_status["elapsed_time"] / (epoch + 1)
+                remaining_epochs = config.n_epochs - (epoch + 1)
+                _training_status["eta"] = avg_epoch_time * remaining_epochs
+            
+            # Record history
+            _training_status["history"]["train_losses"].append(train_loss)
+            _training_status["history"]["val_losses"].append(val_loss)
+            _training_status["history"]["train_accs"].append(train_acc)
+            _training_status["history"]["val_accs"].append(val_acc)
+            
+            # Save best model
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                _training_status["best_val_acc"] = best_val_acc
+                
+                save_dir = Path(config.save_dir)
+                save_dir.mkdir(parents=True, exist_ok=True)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': _trainer.model.state_dict(),
+                    'optimizer_state_dict': _trainer.optimizer.state_dict(),
+                    'val_acc': val_acc,
+                    'val_loss': val_loss,
+                    'n_channels': DEFAULT_NCH,
+                    'n_times': DEFAULT_NTIMES,
+                    'n_classes': DEFAULT_NOUT
+                }, save_dir / "best_synthetic_model.pth")
+        
+        # Save final training history
+        save_dir = Path(config.save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        history = {
+            'train_losses': _training_status["history"]["train_losses"],
+            'val_losses': _training_status["history"]["val_losses"],
+            'train_accs': _training_status["history"]["train_accs"],
+            'val_accs': _training_status["history"]["val_accs"],
+            'best_val_acc': best_val_acc
+        }
+        
+        with open(save_dir / "training_history.json", "w") as f:
+            json.dump(history, f, indent=2)
+            
+    except Exception as e:
+        print(f"Training error: {e}")
+        _training_status["error"] = str(e)
+    finally:
+        _training_status["is_training"] = False
+        _stop_training_flag = False
+
+@app.post("/training/start")
+def start_training(config: TrainingConfig = None):
+    """Start model training with specified configuration"""
+    global _training_thread, _training_status, _stop_training_flag
+    
+    if _training_status["is_training"]:
+        raise HTTPException(400, "Training is already in progress. Stop current training first.")
+    
+    if not LABRAM_AVAILABLE:
+        raise HTTPException(500, "LaBraM model not available. Please install braindecode>=1.1.0")
+    
+    try:
+        # Reset status
+        _training_status = {
+            "is_training": False,
+            "current_epoch": 0,
+            "total_epochs": 0,
+            "train_loss": 0.0,
+            "val_loss": 0.0,
+            "train_acc": 0.0,
+            "val_acc": 0.0,
+            "best_val_acc": 0.0,
+            "start_time": None,
+            "elapsed_time": 0.0,
+            "eta": None,
+            "config": None,
+            "history": {
+                "train_losses": [],
+                "val_losses": [],
+                "train_accs": [],
+                "val_accs": []
+            }
+        }
+        _stop_training_flag = False
+        
+        # Use default config if none provided
+        if config is None:
+            config = TrainingConfig()
+        
+        # Start training in background thread
+        _training_thread = threading.Thread(
+            target=run_training_background,
+            args=(config,),
+            daemon=True
+        )
+        _training_thread.start()
+        
+        return {
+            "success": True,
+            "message": "Training started successfully",
+            "config": config.dict()
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error starting training: {str(e)}")
+
+@app.post("/training/stop")
+def stop_training():
+    """Stop current training"""
+    global _stop_training_flag, _training_status
+    
+    if not _training_status["is_training"]:
+        raise HTTPException(400, "No training is currently in progress")
+    
+    try:
+        _stop_training_flag = True
+        
+        return {
+            "success": True,
+            "message": "Training stop requested. Will stop after current epoch."
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error stopping training: {str(e)}")
+
+@app.get("/training/status")
+def get_training_status():
+    """Get current training status and progress"""
+    global _training_status
+    
+    try:
+        status = dict(_training_status)  # Create a copy using dict()
+        
+        # Add formatted time information
+        if status.get("start_time") is not None:
+            status["elapsed_time_formatted"] = format_duration(status.get("elapsed_time", 0))
+            if status.get("eta") is not None:
+                status["eta_formatted"] = format_duration(status["eta"])
+        
+        return status
+    except Exception as e:
+        # Return basic status if there's an error
+        return {
+            "is_training": False,
+            "error": f"Status error: {str(e)}",
+            "current_epoch": 0,
+            "total_epochs": 0,
+            "train_loss": 0.0,
+            "val_loss": 0.0,
+            "train_acc": 0.0,
+            "val_acc": 0.0,
+            "best_val_acc": 0.0,
+            "elapsed_time": 0.0,
+            "history": {
+                "train_losses": [],
+                "val_losses": [],
+                "train_accs": [],
+                "val_accs": []
+            }
+        }
+
+@app.get("/training/history")
+def get_training_history():
+    """Get training history and metrics"""
+    global _training_status
+    
+    return {
+        "history": _training_status["history"],
+        "current_epoch": _training_status["current_epoch"],
+        "total_epochs": _training_status["total_epochs"],
+        "best_val_acc": _training_status["best_val_acc"]
+    }
+
+@app.get("/training/config")
+def get_default_training_config():
+    """Get default training configuration"""
+    return TrainingConfig().dict()
+
+@app.post("/training/config/validate")
+def validate_training_config(config: TrainingConfig):
+    """Validate training configuration parameters"""
+    errors = []
+    
+    if config.n_epochs <= 0:
+        errors.append("n_epochs must be positive")
+    if config.n_samples_per_class <= 0:
+        errors.append("n_samples_per_class must be positive")
+    if not 0 < config.val_split < 1:
+        errors.append("val_split must be between 0 and 1")
+    if config.learning_rate <= 0:
+        errors.append("learning_rate must be positive")
+    if config.batch_size <= 0:
+        errors.append("batch_size must be positive")
+    if config.weight_decay < 0:
+        errors.append("weight_decay must be non-negative")
+    
+    if errors:
+        return {"valid": False, "errors": errors}
+    else:
+        return {"valid": True, "message": "Configuration is valid"}
+
+def format_duration(seconds: float) -> str:
+    """Format duration in seconds to human-readable string"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.1f}m"
+    else:
+        return f"{seconds/3600:.1f}h"
+
+# ===== REAL DATA TRAINING ENDPOINTS =====
+
+_real_trainer = None
+_real_training_status = {
+    "is_training": False,
+    "current_step": "",
+    "progress": 0.0,
+    "error": None
+}
+
+@app.post("/training/real-data/start")
+def start_real_data_training(config: RealDataTrainingConfig):
+    """Start training on real OpenNeuro EEG data"""
+    global _real_trainer, _real_training_status
+    
+    if _real_training_status["is_training"]:
+        raise HTTPException(400, "Real data training already in progress")
+    
+    try:
+        _real_training_status = {
+            "is_training": True,
+            "current_step": "Initializing",
+            "progress": 0.0,
+            "error": None,
+            "config": config.dict()
+        }
+        
+        # Create trainer (this will be run in background in production)
+        _real_trainer = RealDataTrainer(config.dataset_id)
+        
+        # For now, return success - in production this would be async
+        return {
+            "success": True,
+            "message": f"Real data training started for dataset {config.dataset_id}",
+            "config": config.dict(),
+            "note": "This is a demo endpoint. Full implementation would run in background."
+        }
+        
+    except Exception as e:
+        _real_training_status["is_training"] = False
+        _real_training_status["error"] = str(e)
+        raise HTTPException(500, f"Error starting real data training: {str(e)}")
+
+@app.get("/training/real-data/status")
+def get_real_training_status():
+    """Get real data training status"""
+    return _real_training_status
+
+@app.post("/training/real-data/download")
+def download_openneuro_dataset(dataset_id: str = "ds003969", force_redownload: bool = False):
+    """Download OpenNeuro dataset for training"""
+    try:
+        from real_data_trainer import OpenNeuroDatasetLoader
+        
+        loader = OpenNeuroDatasetLoader(dataset_id)
+        
+        # Download
+        if loader.download_dataset(force_redownload):
+            # Extract
+            if loader.extract_dataset():
+                # Find files
+                eeg_files = loader.find_eeg_files()
+                participants_df = loader.load_participants_info()
+                
+                return {
+                    "success": True,
+                    "dataset_id": dataset_id,
+                    "message": f"Dataset {dataset_id} downloaded and extracted successfully",
+                    "eeg_files_found": len(eeg_files),
+                    "participants_info": participants_df is not None,
+                    "dataset_path": str(loader.extracted_path)
+                }
+            else:
+                raise HTTPException(500, "Failed to extract dataset")
+        else:
+            raise HTTPException(500, "Failed to download dataset")
+            
+    except Exception as e:
+        raise HTTPException(500, f"Error downloading dataset: {str(e)}")
+
+@app.get("/training/real-data/datasets")
+def list_available_datasets():
+    """List available OpenNeuro datasets for meditation/EEG"""
+    return {
+        "available_datasets": [
+            {
+                "id": "ds003969",
+                "name": "Meditation/Mindfulness EEG Dataset",
+                "description": "Real EEG data for meditation state detection",
+                "url": "https://openneuro.org/datasets/ds003969"
+            }
+        ],
+        "note": "Add more datasets as needed for different meditation studies"
+    }
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,12 +1,12 @@
-# EEG API (OpenBCI Cyton x LaBraM)
+# EEG Meditation Detection API (OpenBCI Cyton x LaBraM)
 
-A comprehensive FastAPI server for real-time EEG processing with OpenBCI Cyton boards, featuring electrode detection, impedance testing, and LaBraM brain signal classification.
+A comprehensive FastAPI server for real-time EEG meditation detection with OpenBCI Cyton boards, featuring electrode detection, impedance testing, and LaBraM-based meditation state classification.
 
 ## 🧠 Features
 
 ### **Core Functionality**
 - **Real-time EEG streaming** from OpenBCI Cyton (8 channels, 250 Hz)
-- **LaBraM integration** for advanced brain signal classification  
+- **LaBraM integration** for meditation state detection and classification  
 - **Electrode detection** with impedance testing (OpenBCI z-command protocol)
 - **Live signal quality monitoring** with railing detection
 - **Ring buffer implementation** for sliding window processing
@@ -28,7 +28,7 @@ A comprehensive FastAPI server for real-time EEG processing with OpenBCI Cyton b
 ## 📊 API Endpoints
 
 ### **Core Prediction**
-- `POST /predict` - Run LaBraM inference on EEG data
+- `POST /predict` - Run LaBraM meditation detection on EEG data
 - `GET /health` - API health and model status
 
 ### **BrainFlow/LaBraM Pipeline**
