@@ -175,7 +175,6 @@ eeg/
 ├── brainflow_labram_integration.py  # Complete BrainFlow/LaBraM pipeline
 ├── enhanced_collector.py            # Advanced data collection demo
 ├── electrode_detection_example.py   # Electrode detection demo
-├── collector.py                     # Basic collector (legacy)
 ├── requirements.txt                 # Python dependencies
 ├── README.md                        # This file
 ├── ELECTRODE_DETECTION_README.md    # Electrode detection documentation
