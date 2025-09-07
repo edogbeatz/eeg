@@ -80,7 +80,8 @@ class ElectrodeDetector:
         """
         if channel < 1 or channel > 8:
             raise ValueError("Channel must be between 1 and 8")
-        
+        wait = samples / CYTON_SAMPLING_RATE
+
         try:
             # Stop any existing stream
             try:
@@ -95,11 +96,11 @@ class ElectrodeDetector:
             
             # Wait for command to take effect
             time.sleep(0.1)
-            
+
             # Start streaming and collect data
             self.board.start_stream()
-            time.sleep(0.1)  # Allow stream to stabilize
-            
+            time.sleep(wait)  # Allow enough samples to be collected
+
             # Collect samples
             data = self.board.get_board_data(samples)
             self.board.stop_stream()
