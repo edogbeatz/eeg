@@ -39,6 +39,7 @@ IMPEDANCE_THRESHOLDS = {
 
 # Signal amplitude thresholds for railing detection
 RAILING_THRESHOLD = 0.8  # 80% of full scale
+FULL_SCALE_UV = 1_000_000  # Expected ADC full-scale voltage in microvolts
 MIN_SIGNAL_STD = 1.0     # Minimum std for connected electrode
 MAX_SIGNAL_STD = 100.0   # Maximum std for good contact
 
@@ -46,21 +47,24 @@ MAX_SIGNAL_STD = 100.0   # Maximum std for good contact
 class ElectrodeDetector:
     """
     Electrode detection class for OpenBCI Cyton board.
-    
+
     Implements both impedance-based detection and live signal monitoring.
     """
-    
-    def __init__(self, board: BoardShim):
+
+    def __init__(self, board: BoardShim, full_scale_uv: float = FULL_SCALE_UV):
         """
         Initialize electrode detector.
-        
+
         Args:
             board: Initialized and prepared BoardShim instance
+            full_scale_uv: Expected full-scale ADC voltage in microvolts used
+                for railing detection. Defaults to ``FULL_SCALE_UV``.
         """
         self.board = board
         self.board_id = board.get_board_id()
         self.eeg_channels = BoardShim.get_eeg_channels(self.board_id)
         self.scale_factor = self._get_scale_factor()
+        self.full_scale_uv = full_scale_uv
         
     def _get_scale_factor(self) -> float:
         """Get the scale factor for converting ADC counts to volts."""
@@ -203,12 +207,15 @@ class ElectrodeDetector:
     def detect_live_quality(self, data: np.ndarray) -> Dict:
         """
         Detect electrode connection quality from live signal data.
-        
+
         Args:
             data: EEG data array (n_channels, n_samples)
-            
+
         Returns:
             Dictionary with quality assessment for each channel
+
+        Notes:
+            This method uses ``self.full_scale_uv`` to check for railed signals.
         """
         n_channels, n_samples = data.shape
         results = {}
@@ -223,7 +230,8 @@ class ElectrodeDetector:
             
             # Check for railing (signal saturation)
             max_amplitude = np.max(np.abs(signal))
-            is_railed = max_amplitude > (RAILING_THRESHOLD * np.max(np.abs(data)))
+            full_scale = self.full_scale_uv  # Expected peak voltage (µV)
+            is_railed = max_amplitude >= RAILING_THRESHOLD * full_scale
             
             # Check for flat line (disconnected electrode)
             is_flat = signal_std < MIN_SIGNAL_STD
