@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner'
 import { Play, Pause, RefreshCw, Activity, Zap } from 'lucide-react'
 import { EEGChannelGrid } from './eeg-channel-grid'
-// import { EEGWaveform } from './eeg-waveform' // Skipped for now
+import { EEGWaveform } from './eeg-waveform'
 import { ElectrodeStatus } from './electrode-status'
 import { PredictionDisplay } from './prediction-display'
 
@@ -282,7 +282,7 @@ export function EEGDashboard() {
             </CardContent>
           </Card>
 
-          {/* Waveform Display - Placeholder */}
+          {/* Waveform Display */}
           <Card>
             <CardHeader>
               <CardTitle>EEG Waveforms</CardTitle>
@@ -291,13 +291,11 @@ export function EEGDashboard() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="h-96 flex items-center justify-center bg-slate-50 rounded-lg border-2 border-dashed border-slate-300">
-                <div className="text-center text-slate-500">
-                  <Activity className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                  <p className="text-lg font-medium">Waveform Visualization</p>
-                  <p className="text-sm">Coming soon...</p>
-                </div>
-              </div>
+              <EEGWaveform 
+                data={eegData.data} 
+                samplingRate={eegData.sampling_rate}
+                channels={eegData.channels}
+              />
             </CardContent>
           </Card>
         </div>

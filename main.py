@@ -16,6 +16,8 @@ except ImportError:
     Labram = None
 from electrode_detection import ElectrodeDetector, create_board_connection
 from brainflow_labram_integration import BrainFlowLaBraMPipeline
+from brainflow_synthetic_integration import UnifiedBoardManager, SyntheticBoardManager
+from synthetic_data_generator import SyntheticEEGGenerator
 
 # ---- Cyton-friendly defaults ----
 CYTON_SR = 250                    # Hz
@@ -62,6 +64,8 @@ _loaded_ckpt: Optional[Path] = None
 _board = None
 _electrode_detector = None
 _pipeline = None
+synthetic_manager = None
+synthetic_generator = None
 
 def maybe_download_checkpoint() -> Optional[Path]:
     global _loaded_ckpt
@@ -701,4 +705,189 @@ def predict_synthetic():
         
     except Exception as e:
         raise HTTPException(500, f"Error running synthetic prediction: {str(e)}")
+
+# ===== NEW ENHANCED SYNTHETIC DATA ENDPOINTS =====
+
+@app.post("/synthetic/generate-custom")
+def generate_custom_synthetic(state: str = "relaxed", preprocess: bool = True):
+    """Generate custom synthetic EEG data with specific mental state"""
+    try:
+        generator = SyntheticEEGGenerator()
+        data, label = generator.generate_window(state, preprocess)
+        
+        return {
+            "data": data.tolist(),
+            "label": label,
+            "state": state,
+            "shape": data.shape,
+            "channels": data.shape[0],
+            "samples": data.shape[1],
+            "sampling_rate": 250,
+            "window_seconds": 4.0,
+            "preprocessed": preprocess,
+            "data_range": {
+                "min": float(data.min()),
+                "max": float(data.max()),
+                "mean": float(data.mean()),
+                "std": float(data.std())
+            }
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Error generating custom synthetic data: {str(e)}")
+
+@app.post("/synthetic/generate-dataset")
+def generate_synthetic_dataset(n_samples_per_class: int = 100):
+    """Generate a dataset of synthetic EEG samples"""
+    if n_samples_per_class > 1000:
+        raise HTTPException(400, "Maximum 1000 samples per class to prevent timeout")
+    
+    try:
+        generator = SyntheticEEGGenerator()
+        dataset = generator.generate_dataset(n_samples_per_class)
+        
+        return {
+            "message": f"Generated {dataset['data'].shape[0]} samples",
+            "shape": dataset['data'].shape,
+            "metadata": dataset['metadata'],
+            "class_distribution": {
+                "relaxed": int(np.sum(dataset['labels'] == 0)),
+                "anxious": int(np.sum(dataset['labels'] == 1))
+            }
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Error generating dataset: {str(e)}")
+
+@app.post("/synthetic/connect-board")
+def connect_synthetic_board():
+    """Connect to BrainFlow Synthetic Board for streaming"""
+    global synthetic_manager
+    try:
+        if synthetic_manager is None:
+            synthetic_manager = UnifiedBoardManager()
+        
+        success = synthetic_manager.connect_synthetic()
+        if success:
+            return {
+                "status": "connected",
+                "board_type": "synthetic",
+                "message": "Successfully connected to BrainFlow Synthetic Board"
+            }
+        else:
+            raise HTTPException(500, "Failed to connect to synthetic board")
+    except Exception as e:
+        raise HTTPException(500, f"Error connecting to synthetic board: {str(e)}")
+
+@app.post("/synthetic/start-stream")
+def start_synthetic_stream():
+    """Start streaming from synthetic board"""
+    global synthetic_manager
+    try:
+        if synthetic_manager is None:
+            raise HTTPException(400, "No synthetic board connected. Call /synthetic/connect-board first")
+        
+        success = synthetic_manager.start_stream()
+        if success:
+            return {
+                "status": "streaming",
+                "message": "Synthetic data streaming started"
+            }
+        else:
+            raise HTTPException(500, "Failed to start synthetic stream")
+    except Exception as e:
+        raise HTTPException(500, f"Error starting synthetic stream: {str(e)}")
+
+@app.get("/synthetic/get-window")
+def get_synthetic_window(window_seconds: float = 4.0):
+    """Get a window of data from synthetic board stream"""
+    global synthetic_manager
+    try:
+        if synthetic_manager is None:
+            raise HTTPException(400, "No synthetic board connected")
+        
+        window = synthetic_manager.get_window(window_seconds)
+        if window is not None:
+            return {
+                "data": window.tolist(),
+                "shape": window.shape,
+                "channels": window.shape[0],
+                "samples": window.shape[1],
+                "sampling_rate": 250,
+                "window_seconds": window_seconds,
+                "data_range": {
+                    "min": float(window.min()),
+                    "max": float(window.max()),
+                    "mean": float(window.mean()),
+                    "std": float(window.std())
+                }
+            }
+        else:
+            raise HTTPException(500, "Failed to get window from synthetic board")
+    except Exception as e:
+        raise HTTPException(500, f"Error getting synthetic window: {str(e)}")
+
+@app.post("/synthetic/predict-custom")
+def predict_custom_synthetic(state: str = "relaxed"):
+    """Generate custom synthetic data and run prediction"""
+    try:
+        # Generate custom data
+        generator = SyntheticEEGGenerator()
+        data, true_label = generator.generate_window(state, preprocess=True)
+        
+        # Run prediction
+        model = get_model(DEFAULT_NCH, DEFAULT_NTIMES, DEFAULT_NOUT)
+        x_tensor = torch.from_numpy(data).unsqueeze(0)  # Add batch dimension
+        
+        with torch.no_grad():
+            logits = model(x_tensor)
+            probs = F.softmax(logits, dim=-1).squeeze(0).numpy()
+        
+        predicted_label = int(np.argmax(probs))
+        
+        return {
+            "probs": probs.tolist(),
+            "predicted_label": predicted_label,
+            "true_label": true_label,
+            "state": state,
+            "correct": predicted_label == true_label,
+            "confidence": float(np.max(probs)),
+            "n_chans": data.shape[0],
+            "n_times": data.shape[1],
+            "window_seconds": 4.0,
+            "synthetic_data": True
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Error in synthetic prediction: {str(e)}")
+
+@app.post("/synthetic/disconnect")
+def disconnect_synthetic():
+    """Disconnect from synthetic board"""
+    global synthetic_manager
+    try:
+        if synthetic_manager:
+            synthetic_manager.disconnect()
+            synthetic_manager = None
+        
+        return {
+            "status": "disconnected",
+            "message": "Synthetic board disconnected"
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Error disconnecting synthetic board: {str(e)}")
+
+@app.get("/synthetic/board-info")
+def get_synthetic_board_info():
+    """Get information about synthetic board connection"""
+    global synthetic_manager
+    try:
+        if synthetic_manager:
+            info = synthetic_manager.get_board_info()
+            return info
+        else:
+            return {"connected": False, "type": None}
+    except Exception as e:
+        raise HTTPException(500, f"Error getting board info: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
