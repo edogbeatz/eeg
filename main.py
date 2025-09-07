@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 try:
     from braindecode.models import Labram
@@ -33,6 +34,15 @@ WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 CHECKPOINT_PATH = WEIGHTS_DIR / "labram_checkpoint.pth"
 
 app = FastAPI(title="EEG API (Cyton x LaBraM)")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],  # Frontend URLs
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class InferenceRequest(BaseModel):
     # 2D list: [n_chans][n_times]
@@ -541,4 +551,154 @@ def stop_pipeline():
         
     except Exception as e:
         raise HTTPException(500, f"Error stopping pipeline: {str(e)}")
+
+# Synthetic Board Endpoints for Frontend Testing
+_synthetic_board = None
+_synthetic_board_lock = False
+
+@app.get("/synthetic-data")
+def get_synthetic_data():
+    """Get synthetic EEG data for frontend testing (8 channels × 1000 samples)."""
+    global _synthetic_board, _synthetic_board_lock
+    
+    try:
+        from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
+        import time
+        
+        # Avoid concurrent board access
+        if _synthetic_board_lock:
+            # Generate simple synthetic data without BrainFlow
+            import numpy as np
+            np.random.seed(int(time.time()) % 1000)
+            eeg8 = np.random.randn(8, 1000) * 50 + np.sin(np.arange(1000) * 0.02)[:, np.newaxis].T * 20
+            electrode_status = detect_electrode_connections(eeg8)
+            
+            return {
+                "data": eeg8.tolist(),
+                "shape": eeg8.shape,
+                "channels": 8,
+                "samples": 1000,
+                "sampling_rate": 250,
+                "window_seconds": 4.0,
+                "electrode_status": electrode_status,
+                "data_range": {
+                    "min": float(eeg8.min()),
+                    "max": float(eeg8.max()),
+                    "mean": float(eeg8.mean()),
+                    "std": float(eeg8.std())
+                }
+            }
+        
+        _synthetic_board_lock = True
+        
+        try:
+            # Create synthetic board
+            params = BrainFlowInputParams()
+            board = BoardShim(BoardIds.SYNTHETIC_BOARD.value, params)
+            board.prepare_session()
+            board.start_stream()
+            
+            # Collect data for ~4 seconds
+            time.sleep(4.2)
+            data = board.get_board_data()
+            
+            # Clean up
+            board.stop_stream()
+            board.release_session()
+            
+            # Get EEG channels
+            eeg_channels = BoardShim.get_eeg_channels(BoardIds.SYNTHETIC_BOARD.value)
+            eeg_data = data[eeg_channels, :]
+            
+            # Take first 8 channels and last 1000 samples
+            eeg8 = eeg_data[:8, -1000:]
+            
+            # Detect electrode connections
+            electrode_status = detect_electrode_connections(eeg8)
+            
+            return {
+                "data": eeg8.tolist(),
+                "shape": eeg8.shape,
+                "channels": 8,
+                "samples": 1000,
+                "sampling_rate": 250,
+                "window_seconds": 4.0,
+                "electrode_status": electrode_status,
+                "data_range": {
+                    "min": float(eeg8.min()),
+                    "max": float(eeg8.max()),
+                    "mean": float(eeg8.mean()),
+                    "std": float(eeg8.std())
+                }
+            }
+        finally:
+            _synthetic_board_lock = False
+        
+    except Exception as e:
+        _synthetic_board_lock = False
+        raise HTTPException(500, f"Error generating synthetic data: {str(e)}")
+
+@app.get("/synthetic-stream")
+def get_synthetic_stream():
+    """Get a continuous stream of synthetic EEG data."""
+    global _synthetic_board_lock
+    
+    try:
+        import time
+        import numpy as np
+        
+        # Use simple numpy generation for streaming to avoid BrainFlow conflicts
+        np.random.seed(int(time.time() * 1000) % 10000)
+        
+        # Generate realistic EEG-like data
+        t = np.arange(250) / 250.0  # 1 second at 250 Hz
+        eeg8 = np.zeros((8, 250))
+        
+        for ch in range(8):
+            # Mix of frequencies typical in EEG
+            alpha = 10 * np.sin(2 * np.pi * 10 * t)  # 10 Hz alpha
+            beta = 5 * np.sin(2 * np.pi * 20 * t)    # 20 Hz beta
+            noise = np.random.randn(250) * 15         # Background noise
+            eeg8[ch, :] = alpha + beta + noise + np.random.randn() * 10
+        
+        return {
+            "data": eeg8.tolist(),
+            "shape": eeg8.shape,
+            "channels": 8,
+            "samples": 250,
+            "sampling_rate": 250,
+            "timestamp": time.time(),
+            "data_range": {
+                "min": float(eeg8.min()),
+                "max": float(eeg8.max()),
+                "mean": float(eeg8.mean()),
+                "std": float(eeg8.std())
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error generating synthetic stream: {str(e)}")
+
+@app.post("/predict-synthetic")
+def predict_synthetic():
+    """Run prediction on synthetic EEG data."""
+    try:
+        # Get synthetic data
+        synthetic_response = get_synthetic_data()
+        eeg_data = synthetic_response["data"]
+        
+        # Create inference request
+        req = InferenceRequest(x=eeg_data, n_outputs=2)
+        
+        # Run prediction
+        result = predict(req)
+        
+        # Add synthetic data info
+        result["synthetic_data"] = True
+        result["data_source"] = "brainflow_synthetic_board"
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error running synthetic prediction: {str(e)}")
 
