@@ -335,10 +335,12 @@ class BrainFlowLaBraMPipeline:
             battery_channel = BoardShim.get_battery_channel(BoardIds.CYTON_BOARD.value)
             battery_level = None
             
-            if battery_channel is not None:
+            if battery_channel is not None and battery_channel >= 0:
                 data = self.board.get_board_data(1)
                 if data.shape[0] > battery_channel:
                     battery_level = float(data[battery_channel, -1])
+            else:
+                battery_level = None
             
             return {
                 "board_id": BoardIds.CYTON_BOARD.value,
