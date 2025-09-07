@@ -1,12 +1,20 @@
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from braindecode.models import Labram
+try:
+    from braindecode.models import Labram
+    LABRAM_AVAILABLE = True
+except ImportError:
+    print("⚠️  LaBraM model not available in this version of braindecode")
+    LABRAM_AVAILABLE = False
+    Labram = None
+from electrode_detection import ElectrodeDetector, create_board_connection
+from brainflow_labram_integration import BrainFlowLaBraMPipeline
 
 # ---- Cyton-friendly defaults ----
 CYTON_SR = 250                    # Hz
@@ -28,12 +36,22 @@ app = FastAPI(title="EEG API (Cyton x LaBraM)")
 
 class InferenceRequest(BaseModel):
     # 2D list: [n_chans][n_times]
-    x: list[list[float]]
-    n_outputs: int | None = None   # falls back to DEFAULT_NOUT
+    x: List[List[float]]
+    n_outputs: Optional[int] = None   # falls back to DEFAULT_NOUT
+
+class ElectrodeImpedanceRequest(BaseModel):
+    channels: List[int] = [1, 2, 3, 4, 5, 6, 7, 8]  # Default to all channels
+    samples: int = 250  # Default to 1 second of data
+
+class BoardConnectionRequest(BaseModel):
+    serial_port: str
 
 _model = None
 _shape = None
 _loaded_ckpt: Optional[Path] = None
+_board = None
+_electrode_detector = None
+_pipeline = None
 
 def maybe_download_checkpoint() -> Optional[Path]:
     global _loaded_ckpt
@@ -62,6 +80,9 @@ def get_model(n_chans: int, n_times: int, n_outputs: int):
     global _model, _shape
     key = (n_chans, n_times, n_outputs)
     if _model is None or _shape != key:
+        if not LABRAM_AVAILABLE:
+            raise HTTPException(500, "LaBraM model not available. Please install braindecode>=1.1.0")
+        
         m = Labram(
             n_chans=n_chans,
             n_times=n_times,
@@ -176,4 +197,348 @@ def predict(req: InferenceRequest):
         "window_seconds": n_times / CYTON_SR,
         "electrode_status": electrode_status
     }
+
+# Electrode Detection Endpoints
+
+@app.post("/connect-board")
+def connect_board(req: BoardConnectionRequest):
+    """Connect to OpenBCI Cyton board."""
+    global _board, _electrode_detector
+    
+    try:
+        # Release existing connection if any
+        if _board is not None:
+            try:
+                _board.release_session()
+            except:
+                pass
+        
+        # Create new connection
+        _board = create_board_connection(req.serial_port)
+        if _board is None:
+            raise HTTPException(400, f"Failed to connect to board on {req.serial_port}")
+        
+        # Create electrode detector
+        _electrode_detector = ElectrodeDetector(_board)
+        
+        return {
+            "success": True,
+            "serial_port": req.serial_port,
+            "message": "Board connected successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error connecting to board: {str(e)}")
+
+@app.get("/board-status")
+def get_board_status():
+    """Get current board status and information."""
+    global _board, _electrode_detector
+    
+    if _board is None or _electrode_detector is None:
+        return {
+            "connected": False,
+            "message": "No board connection. Use /connect-board endpoint first."
+        }
+    
+    try:
+        status = _electrode_detector.get_board_status()
+        status["connected"] = True
+        return status
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error getting board status: {str(e)}")
+
+@app.get("/battery")
+def get_battery():
+    """Get battery level from the board."""
+    global _board, _electrode_detector
+    
+    if _board is None or _electrode_detector is None:
+        raise HTTPException(400, "No board connection. Use /connect-board endpoint first.")
+    
+    try:
+        status = _electrode_detector.get_board_status()
+        battery_level = status.get("battery_level")
+        
+        if battery_level is None:
+            return {
+                "battery_level": None,
+                "message": "Battery level not available"
+            }
+        
+        return {
+            "battery_level": battery_level,
+            "unit": "volts"
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error reading battery: {str(e)}")
+
+@app.post("/electrode-impedance")
+def measure_electrode_impedance(req: ElectrodeImpedanceRequest):
+    """Measure electrode impedance for specified channels."""
+    global _board, _electrode_detector
+    
+    if _board is None or _electrode_detector is None:
+        raise HTTPException(400, "No board connection. Use /connect-board endpoint first.")
+    
+    try:
+        results = []
+        
+        # Validate channels
+        for channel in req.channels:
+            if channel < 1 or channel > 8:
+                raise HTTPException(400, f"Channel {channel} must be between 1 and 8")
+        
+        # Measure impedance for each channel
+        for channel in req.channels:
+            result = _electrode_detector.measure_impedance(channel, req.samples)
+            results.append(result)
+        
+        return {
+            "results": results,
+            "channels_tested": req.channels,
+            "samples_per_channel": req.samples,
+            "test_duration_seconds": len(req.channels) * (req.samples / CYTON_SR + 0.2)  # Include overhead
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error measuring impedance: {str(e)}")
+
+@app.post("/live-quality")
+def get_live_quality(req: InferenceRequest):
+    """Get real-time electrode connection quality from live signal data."""
+    global _electrode_detector
+    
+    if _electrode_detector is None:
+        raise HTTPException(400, "No board connection. Use /connect-board endpoint first.")
+    
+    try:
+        x = np.asarray(req.x, dtype=np.float32)
+        if x.ndim != 2:
+            raise HTTPException(400, "x must be 2D: [n_chans][n_times]")
+        
+        # Use the electrode detector's live quality detection
+        quality_results = _electrode_detector.detect_live_quality(x)
+        
+        return {
+            "live_quality": quality_results,
+            "n_chans": x.shape[0],
+            "n_times": x.shape[1],
+            "window_seconds": x.shape[1] / CYTON_SR
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error analyzing live quality: {str(e)}")
+
+@app.post("/disconnect-board")
+def disconnect_board():
+    """Disconnect from the OpenBCI board."""
+    global _board, _electrode_detector, _pipeline
+    
+    try:
+        # Clean up pipeline if running
+        if _pipeline is not None:
+            _pipeline.cleanup()
+            _pipeline = None
+        
+        # Clean up board connection
+        if _board is not None:
+            _board.release_session()
+            _board = None
+            _electrode_detector = None
+        
+        return {
+            "success": True,
+            "message": "Board disconnected successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error disconnecting board: {str(e)}")
+
+# Enhanced BrainFlow/LaBraM Integration Endpoints
+
+@app.post("/start-pipeline")
+def start_pipeline(req: BoardConnectionRequest):
+    """Start the complete BrainFlow/LaBraM pipeline."""
+    global _pipeline
+    
+    try:
+        # Clean up existing pipeline
+        if _pipeline is not None:
+            _pipeline.cleanup()
+        
+        # Create new pipeline
+        _pipeline = BrainFlowLaBraMPipeline(
+            serial_port=req.serial_port,
+            window_seconds=WINDOW_SECONDS,
+            n_outputs=DEFAULT_NOUT,
+            model_checkpoint=str(CHECKPOINT_PATH) if CHECKPOINT_PATH.exists() else None
+        )
+        
+        # Connect to board
+        if not _pipeline.connect_board():
+            raise HTTPException(400, f"Failed to connect to board on {req.serial_port}")
+        
+        # Load model
+        if not _pipeline.load_model():
+            raise HTTPException(500, "Failed to load LaBraM model")
+        
+        # Start streaming
+        if not _pipeline.start_streaming():
+            raise HTTPException(500, "Failed to start data streaming")
+        
+        return {
+            "success": True,
+            "message": "BrainFlow/LaBraM pipeline started successfully",
+            "status": _pipeline.get_status()
+        }
+        
+    except Exception as e:
+        if _pipeline is not None:
+            _pipeline.cleanup()
+            _pipeline = None
+        raise HTTPException(500, f"Error starting pipeline: {str(e)}")
+
+@app.get("/pipeline-status")
+def get_pipeline_status():
+    """Get current pipeline status."""
+    global _pipeline
+    
+    if _pipeline is None:
+        return {
+            "running": False,
+            "message": "Pipeline not started. Use /start-pipeline endpoint first."
+        }
+    
+    try:
+        status = _pipeline.get_status()
+        status["running"] = True
+        return status
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error getting pipeline status: {str(e)}")
+
+@app.get("/current-window")
+def get_current_window():
+    """Get the current sliding window data."""
+    global _pipeline
+    
+    if _pipeline is None:
+        raise HTTPException(400, "Pipeline not started. Use /start-pipeline endpoint first.")
+    
+    try:
+        window = _pipeline.get_current_window()
+        if window is None:
+            raise HTTPException(400, "No data available")
+        
+        return {
+            "window_data": window.tolist(),
+            "shape": window.shape,
+            "window_seconds": WINDOW_SECONDS,
+            "n_channels": window.shape[0],
+            "n_times": window.shape[1],
+            "data_range": {
+                "min": float(window.min()),
+                "max": float(window.max()),
+                "mean": float(window.mean()),
+                "std": float(window.std())
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error getting current window: {str(e)}")
+
+@app.post("/predict-realtime")
+def predict_realtime():
+    """Run LaBraM prediction on current window."""
+    global _pipeline
+    
+    if _pipeline is None:
+        raise HTTPException(400, "Pipeline not started. Use /start-pipeline endpoint first.")
+    
+    try:
+        result = _pipeline.predict_window()
+        
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        
+        return {
+            "prediction": result,
+            "timestamp": result.get("timestamp", 0),
+            "pipeline_status": _pipeline.get_status()
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error running prediction: {str(e)}")
+
+@app.post("/predict-window")
+def predict_window(req: InferenceRequest):
+    """Run LaBraM prediction on provided window data."""
+    global _pipeline
+    
+    if _pipeline is None:
+        raise HTTPException(400, "Pipeline not started. Use /start-pipeline endpoint first.")
+    
+    try:
+        x = np.asarray(req.x, dtype=np.float32)
+        if x.ndim != 2:
+            raise HTTPException(400, "x must be 2D: [n_chans][n_times]")
+        
+        n_chans, n_times = x.shape
+        if n_chans != DEFAULT_NCH:
+            raise HTTPException(400, f"expected {DEFAULT_NCH} channels for Cyton")
+        
+        # Convert to volts if needed (assuming input is in microvolts)
+        if np.max(np.abs(x)) > 1.0:  # Likely microvolts
+            x = x / 1e6  # Convert to volts
+        
+        result = _pipeline.predict_window(x)
+        
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        
+        return {
+            "prediction": result,
+            "input_shape": x.shape,
+            "window_seconds": n_times / CYTON_SR,
+            "data_converted_to_volts": True
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error running prediction: {str(e)}")
+
+@app.get("/board-info")
+def get_board_info():
+    """Get detailed board information."""
+    global _pipeline
+    
+    if _pipeline is None:
+        raise HTTPException(400, "Pipeline not started. Use /start-pipeline endpoint first.")
+    
+    try:
+        board_info = _pipeline.get_board_info()
+        return board_info
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error getting board info: {str(e)}")
+
+@app.post("/stop-pipeline")
+def stop_pipeline():
+    """Stop the BrainFlow/LaBraM pipeline."""
+    global _pipeline
+    
+    try:
+        if _pipeline is not None:
+            _pipeline.cleanup()
+            _pipeline = None
+        
+        return {
+            "success": True,
+            "message": "Pipeline stopped successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error stopping pipeline: {str(e)}")
 
