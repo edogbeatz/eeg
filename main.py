@@ -174,31 +174,42 @@ def get_model(n_chans: int, n_times: int, n_outputs: int):
     return _model
 
 def detect_electrode_connections(arr: np.ndarray) -> dict:
+    """Estimate electrode connection quality for each channel.
+
+    Historically we looked at statistics computed across the whole inference
+    window (``WINDOW_SECONDS``). With a four second window this made the UI feel
+    sluggish when an electrode was unplugged because the previous three seconds
+    of data still dominated the statistics. To make the feedback more responsive
+    we now emphasise the most recent data while still keeping the historical
+    values around for context.
     """
-    Detect which electrodes are connected to scalp vs disconnected.
-    Returns connection quality for each channel.
-    """
+
     n_chans, n_times = arr.shape
     connections = {}
-    
+
+    # Use roughly the last second of data for quick responsiveness. If we have
+    # fewer samples than that (e.g. during warm-up) fall back to whatever is
+    # available to avoid crashes.
+    recent_window = min(n_times, CYTON_SR)
+
     for ch in range(n_chans):
         signal = arr[ch, :]
-        
-        # Calculate signal statistics
-        signal_std = np.std(signal)
+        recent_signal = signal[-recent_window:]
+
+        # Calculate signal statistics for both the full window and the most
+        # recent chunk. The recent statistics drive the status decision while
+        # the full-window numbers offer stability and are returned for display.
+        global_std = np.std(signal)
+        recent_std = np.std(recent_signal)
         signal_range = np.max(signal) - np.min(signal)
         signal_energy = np.sum(signal ** 2) / n_times
-        
-        # Check for flat line (disconnected electrode)
-        is_flat = signal_std < 1.0  # Very low variation
-        
-        # Check for excessive noise (poor contact)
-        is_noisy = signal_std > 100  # Very high variation (microvolts)
-        
-        # Check for reasonable signal range (good contact)
-        is_good_range = 2 < signal_std < 80  # Typical EEG range
-        
-        # Determine connection status
+
+        # Determine connection status primarily from the most recent standard
+        # deviation so that changes show up quickly.
+        is_flat = recent_std < 1.0  # Very low variation -> likely disconnected
+        is_noisy = recent_std > 100  # Very high variation (microvolts)
+        is_good_range = 2 < recent_std < 80  # Typical EEG range
+
         if is_flat:
             status = "disconnected"
             quality = 0.0
@@ -211,15 +222,16 @@ def detect_electrode_connections(arr: np.ndarray) -> dict:
         else:
             status = "poor_contact"
             quality = 0.6
-            
+
         connections[f"ch{ch+1}"] = {
             "status": status,
             "quality": quality,
-            "std": float(signal_std),
+            "std": float(global_std),
+            "recent_std": float(recent_std),
             "range": float(signal_range),
             "energy": float(signal_energy)
         }
-    
+
     return connections
 
 def preprocess(arr: np.ndarray) -> np.ndarray:
